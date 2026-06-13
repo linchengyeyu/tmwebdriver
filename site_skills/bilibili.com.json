@@ -1,0 +1,23 @@
+{
+  "get_page_text": {
+    "js": "document.body.innerText",
+    "description": "获取当前页面纯文本内容",
+    "tags": ["scrape"],
+    "updated_at": "2026-06-14",
+    "use_count": 0
+  },
+  "get_video_list": {
+    "js": "(function(){var items=[];var links=document.querySelectorAll('a[href*=\"bilibili.com/video/\"]');var seen={};links.forEach(function(a){var href=a.href.split('?')[0];if(href&&!seen[href]){seen[href]=true;items.push({title:(a.title||a.textContent.trim()).substring(0,80),link:href});}});return JSON.stringify(items);})()",
+    "description": "获取页面上所有B站视频链接和标题",
+    "tags": ["scrape"],
+    "updated_at": "2026-06-14",
+    "use_count": 0
+  },
+  "search": {
+    "js": "window.location.href='https://search.bilibili.com/all?keyword={{keyword}}'",
+    "description": "在B站搜索关键词。用法: execute_skill('search', keyword='AI工具')",
+    "tags": ["navigate"],
+    "updated_at": "2026-06-14",
+    "use_count": 0
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "search": {
+    "js": "window.location.href='https://www.google.com/search?q={{keyword}}'",
+    "description": "Google搜索。用法: execute_skill('search', keyword='AI工具')",
+    "tags": ["navigate"],
+    "updated_at": "2026-06-14",
+    "use_count": 0
+  },
+  "get_search_results": {
+    "js": "(function(){var results=[];document.querySelectorAll('.g').forEach(function(el){var h3=el.querySelector('h3');var link=el.querySelector('a[href]');var snippet=el.querySelector('.VwiC3b, span.aCOpRe');if(h3&&link){results.push({title:h3.textContent,url:link.href,snippet:snippet?snippet.textContent.trim().substring(0,150):''});}});return JSON.stringify(results);})()",
+    "description": "提取Google搜索结果（标题+链接+摘要）",
+    "tags": ["scrape"],
+    "updated_at": "2026-06-14",
+    "use_count": 0
+  }
+}

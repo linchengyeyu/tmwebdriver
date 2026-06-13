@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+.env
+site_skills/mp.weixin.qq.com.json
+site_skills/chatgpt.com.json
+.DS_Store
