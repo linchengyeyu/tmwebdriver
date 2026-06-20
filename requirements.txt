@@ -1,0 +1,4 @@
+simple-websocket-server
+requests
+beautifulsoup4
+bottle
