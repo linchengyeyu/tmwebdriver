@@ -1,161 +1,215 @@
-# TMWebDriver — Control Your Real Chrome Browser
+# TMWebDriver
 
-Control the Chrome browser you're already logged into. No new browser instance, no headless mode, no re-login. Your cookies and sessions are preserved.
+Control the real Chrome browser you already use from Python.
+
+No headless browser. No separate automation profile. No re-login. TMWebDriver connects Python scripts to your live Chrome tabs through a local server and a Manifest V3 extension, then executes JavaScript in the page you are already logged into.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](pyproject.toml)
+[![Chrome Extension](https://img.shields.io/badge/Chrome-Extension-green.svg)](assets/manifest.json)
+
+## Why It Exists
+
+Modern browser automation often starts a clean browser profile. That is painful when the useful state lives in your daily browser: cookies, logged-in creator accounts, internal tools, AI chats, dashboards, and tabs you already opened.
+
+TMWebDriver keeps that state where it is.
+
+| You want to | TMWebDriver gives you |
+| --- | --- |
+| Automate websites where you are already logged in | Commands run in your existing Chrome tabs |
+| Avoid bot-like headless sessions | A normal user browser with your normal profile |
+| Build repeatable site actions | Site Skills stored as editable JSON |
+| Let an AI agent operate a page cheaply | Direct JavaScript execution, no LLM call per click |
 
 ## How It Works
 
-1. **Chrome Extension** — A Manifest V3 extension that bridges between your browser tabs and a local WebSocket/HTTP server
-2. **Python Server** — Receives JS code from your script, sends it to the extension, returns the result
-3. **Site Skills** — Successful operations are saved as reusable skills. Next time you visit the same domain, one command does it all
-
-```
-Your Script → Python Server (WS :18765 / HTTP :18766) → Chrome Extension → Web Page
-                                                                     ↓
-                    Your Script ← Result ←━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┘
+```text
+Python script -> Local server (WS :18765 / HTTP :18766)
+              -> Chrome extension
+              -> Your existing Chrome tab
+              -> Result back to Python
 ```
 
-## Why Not browser-use / Selenium / Playwright?
-
-| Tool | Problem |
-|------|---------|
-| **browser-use** (98k★) | Every step calls an LLM. Searching Baidu costs more in tokens than your electricity bill |
-| **Selenium** | Bot fingerprint detected by anti-crawl. Can't connect to your logged-in browser |
-| **Playwright** | Great API, but defaults to launching a fresh browser. You lose all your logins |
-
-TMWebDriver connects to the Chrome you already use. Zero LLM calls. Zero re-login. Just direct JS execution on real pages.
+The extension reports open tabs to the local Python server. Your script picks a tab and sends JavaScript to execute inside that page. Successful snippets can be saved as Site Skills and reused later.
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Install
+
+Clone the repo, then install it in editable mode:
 
 ```bash
-pip install simple-websocket-server requests beautifulsoup4 bottle
+git clone https://github.com/linchengyeyu/tmwebdriver.git
+cd tmwebdriver
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e .
 ```
 
-### 2. Load the Chrome Extension
+Or install only the dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### 2. Load the Chrome extension
 
 1. Open `chrome://extensions`
-2. Enable **Developer mode** (top right)
+2. Enable **Developer mode**
 3. Click **Load unpacked**
-4. Select the `assets/` folder from this repo
+4. Select this repo's `assets/` folder
 
-### 3. Start the server
+### 3. Start Python and list tabs
 
 ```python
 from TMWebDriver import TMWebDriver
 
-driver = TMWebDriver(host='127.0.0.1', port=18765)
+driver = TMWebDriver()
 
-# List connected tabs
-sessions = driver.get_all_sessions()
-print(sessions)
-# [{'id': '123', 'url': 'https://www.bilibili.com', 'title': 'B站'}]
+for tab in driver.get_all_sessions():
+    print(tab["id"], tab["title"], tab["url"])
 ```
 
-### 4. Execute JavaScript on any tab
+If the list is empty, wait a few seconds and reload the extension or the target tab.
+
+### 4. Run JavaScript in a real tab
 
 ```python
-# Get page text
-result = driver.execute_js("document.body.innerText")
+driver.set_session("github.com")
 
-# Find a tab by URL
-driver.set_session("bilibili")
+title = driver.execute_js("document.title")
+text = driver.execute_js("document.body.innerText.slice(0, 500)")
 
-# Run JS on that tab
-result = driver.execute_js("document.title", session_id="bilibili_tab_id")
+print(title)
+print(text)
 ```
 
-## Site Skills — It Learns
+You can also run the included example:
 
-Inspired by [Browser Harness](https://github.com/browser-use/browser-harness) domain skills, but simpler: save verified JS code, reuse forever.
+```bash
+python examples/quickstart.py github.com
+```
 
-### Save a skill (first time)
+## Site Skills
+
+Site Skills are reusable JavaScript snippets stored by domain in `site_skills/*.json`. They are useful for turning a proven page action into a one-line command.
+
+Save a skill:
 
 ```python
+driver.set_session("bilibili.com")
+
 driver.execute_and_save(
     "search",
     "window.location.href='https://search.bilibili.com/all?keyword={{keyword}}'",
-    description="Search on Bilibili"
+    description="Search Bilibili by keyword",
+    keyword="AI tools",
 )
 ```
 
-### Use it (every time after)
+Use it later:
 
 ```python
-driver.execute_skill("search", keyword="AI tools")
-# That's it. One line.
+driver.set_session("bilibili.com")
+driver.execute_skill("search", keyword="browser automation")
 ```
 
-### Browse learned skills
+List saved skills:
 
 ```python
-driver.list_skills()
-# {'bilibili.com': {'search': 'Search on Bilibili', ...}, ...}
+print(driver.list_skills())
 ```
 
-Skills are stored as JSON in `site_skills/{domain}.json`. Edit them manually anytime.
+## Common Use Cases
 
-## API Reference
+- Scrape text from pages that require your existing login.
+- Fill internal dashboards or admin panels from Python.
+- Trigger repetitive creator-platform tasks from scripts.
+- Give an AI agent a low-cost browser control layer.
+- Save site-specific workflows as editable JSON skills.
+
+## API Overview
 
 | Method | Description |
-|--------|-------------|
-| `get_all_sessions()` | List all connected browser tabs |
-| `find_session(pattern)` | Find tab by URL keyword |
-| `set_session(pattern)` | Set default tab by URL keyword |
-| `execute_js(code, timeout=15)` | Run JavaScript on a tab |
-| `jump(url)` | Navigate current tab to URL |
-| `save_skill(name, js, description, domain)` | Save a reusable skill |
-| `get_skill(name, domain)` | Get a saved skill |
-| `list_skills(domain)` | List all skills |
-| `execute_skill(name, **variables)` | Execute a saved skill with variable substitution |
-| `execute_and_save(name, js, **variables)` | Execute JS and auto-save as skill |
+| --- | --- |
+| `get_all_sessions()` | List connected Chrome tabs |
+| `find_session(pattern)` | Find tabs whose URL contains `pattern` |
+| `set_session(pattern)` | Set the default tab by URL keyword |
+| `execute_js(code, timeout=15)` | Execute JavaScript in the selected tab |
+| `jump(url)` | Navigate the selected tab to a URL |
+| `newtab(url=None)` | Open a new tab |
+| `save_skill(name, js, description="", domain=None)` | Save a reusable site skill |
+| `get_skill(name, domain=None)` | Load a saved site skill |
+| `list_skills(domain=None)` | List saved skills |
+| `execute_skill(name, **variables)` | Run a saved skill with variable substitution |
+| `execute_and_save(name, js, **variables)` | Execute JavaScript and save it as a skill |
 
 ## Project Structure
 
-```
+```text
 tmwebdriver/
-├── TMWebDriver.py        # Core: WebSocket/HTTP server + API
-├── simphtml.py           # HTML simplification utilities
-├── assets/               # Chrome Extension (Manifest V3)
-│   ├── manifest.json
-│   ├── background.js     # Extension service worker (CDP bridge)
-│   ├── content.js        # Content script injected into pages
-│   ├── config.js
-│   ├── popup.html / popup.js
-│   └── disable_dialogs.js
-└── site_skills/          # Auto-saved website operation skills
-    ├── bilibili.com.json
-    └── google.com.json
+├── TMWebDriver.py        # Python server and public API
+├── simphtml.py           # HTML simplification helpers
+├── multipost.py          # Experimental multi-platform publishing helper
+├── assets/               # Chrome extension
+├── examples/             # Runnable examples
+└── site_skills/          # Saved domain skills
 ```
 
 ## Troubleshooting
 
 ### Chrome blocks WebSocket to localhost
 
-Chrome 147+ added Local Network Access restrictions. Disable both flags:
-- `chrome://flags/#local-network-access-check` → **Disabled**
-- `chrome://flags/#local-network-access-check-websockets` → **Disabled**
+Some Chrome versions enforce Local Network Access restrictions. If the extension cannot connect, open these flags and disable them:
 
-Then relaunch Chrome and reload the extension.
+- `chrome://flags/#local-network-access-check`
+- `chrome://flags/#local-network-access-check-websockets`
 
-### `execute_js` returns `remote_execute_js`
+Relaunch Chrome, reload the extension, and restart your Python process.
 
-Content script not injected. Reload the tab:
-```python
-driver.execute_js('window.location.reload()', session_id=sid)
-import time; time.sleep(5)
-```
+### `get_all_sessions()` returns an empty list
 
-### Sessions empty after connecting
+Try this checklist:
 
-Wait up to 15 seconds for the extension to establish the WebSocket connection:
+1. Confirm the extension is enabled in `chrome://extensions`
+2. Start Python with `driver = TMWebDriver()`
+3. Reload the target Chrome tab
+4. Wait up to 15 seconds
+
 ```python
 import time
-for i in range(15):
+
+for _ in range(15):
     sessions = driver.get_all_sessions()
-    if sessions: break
+    if sessions:
+        break
     time.sleep(1)
 ```
+
+### JavaScript times out
+
+The script may have been delivered but not returned a serializable value. Start with a small expression:
+
+```python
+driver.execute_js("document.title")
+```
+
+Then move to longer async snippets once the connection is confirmed.
+
+## Security Notes
+
+TMWebDriver can execute JavaScript in pages where you are logged in. Treat it like a local developer tool:
+
+- Run it only on your own machine.
+- Keep the server bound to `127.0.0.1`.
+- Do not paste untrusted JavaScript into `execute_js`.
+- Review Site Skills before sharing them.
+
+## Roadmap
+
+- Package a signed extension release.
+- Add screenshots and a short demo video.
+- Add more examples for scraping, form filling, and AI-agent use.
+- Publish stable version tags.
 
 ## License
 
@@ -163,5 +217,5 @@ MIT
 
 ## Acknowledgments
 
-- [Browser Harness](https://github.com/browser-use/browser-harness) — Site Skills design inspiration
-- [Playwright](https://playwright.dev/) — CDP protocol reference
+- [Browser Harness](https://github.com/browser-use/browser-harness) for the Site Skills idea.
+- [Playwright](https://playwright.dev/) for browser automation inspiration.

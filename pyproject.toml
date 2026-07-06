@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tmwebdriver"
+version = "0.1.0"
+description = "Control your real Chrome browser from Python through a local extension bridge."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+  { name = "linchengyeyu" }
+]
+keywords = [
+  "browser-automation",
+  "chrome-extension",
+  "real-browser",
+  "websocket",
+  "ai-agent",
+  "rpa"
+]
+dependencies = [
+  "simple-websocket-server",
+  "requests",
+  "beautifulsoup4",
+  "bottle"
+]
+
+[project.urls]
+Homepage = "https://github.com/linchengyeyu/tmwebdriver"
+Repository = "https://github.com/linchengyeyu/tmwebdriver"
+Issues = "https://github.com/linchengyeyu/tmwebdriver/issues"
+
+[tool.setuptools]
+py-modules = ["TMWebDriver", "simphtml", "multipost"]
