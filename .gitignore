@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 __pycache__/
 *.pyc
 venv/
@@ -7,14 +6,7 @@ venv/
 dist/
 build/
 .env
-site_skills/mp.weixin.qq.com.json
-site_skills/chatgpt.com.json
-.DS_Store
-=======
-venv/
-__pycache__/
-*.pyc
-site_skills/
 .DS_Store
 *.log
->>>>>>> 46e77b6 (feat: add MultiPost module — one-click multi-platform content publishing)
+site_skills/mp.weixin.qq.com.json
+site_skills/chatgpt.com.json

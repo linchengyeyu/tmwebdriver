@@ -1,0 +1,27 @@
+{
+  "search_v2": {
+    "js": "(function(){\n    // 直接跳到搜索结果页（最可靠，绕过 SPA 提交问题）\n    var keyword = \"{{keyword}}\";\n    window.location.href = \"https://search.bilibili.com/all?keyword=\" + encodeURIComponent(keyword);\n    return JSON.stringify({success:true, message:\"navigating to search: \" + keyword});\n})()",
+    "description": "B站搜索关键词（outline 沉淀 + 人工优化 URL 跳转）",
+    "tags": [
+      "outline-derived",
+      "enhanced"
+    ],
+    "source": "dom_outline",
+    "note": "原始 outline 沉淀了 input selector，但 B站 SPA 提交复杂，改为直接 URL 跳转更可靠",
+    "resolved_steps": [
+      {
+        "type": "input",
+        "tag": "input",
+        "text": "",
+        "selectors": [
+          "input[placeholder=\"凡人修仙传动漫\"]",
+          "input[type=\"text\"]",
+          "xpath:/html/body/div[2]/div[2]/div[1]/div[1]/div[1]/div[1]/form[1]/div[1]/input[1]"
+        ],
+        "param": "keyword"
+      }
+    ],
+    "updated_at": "2026-07-19",
+    "use_count": 0
+  }
+}
