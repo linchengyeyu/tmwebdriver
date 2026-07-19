@@ -333,6 +333,34 @@ class TMWebDriver:
         except:
             return {'success': False, 'raw': result.get('data', '')[:200]}
 
+    def hover_index(self, index, session_id=None):
+        """
+        通过编号悬停元素（触发 hover/mouseenter 下拉菜单）
+
+        微信后台上「添加回复内容」这类 hover 触发式菜单需要这个。
+
+        :param index: get_page_outline() 返回的编号
+        :return: dict {success: bool, message: str}
+        """
+        js = f"""(function() {{
+    var el = window._tmw_get_element_by_index ? window._tmw_get_element_by_index({index}) : null;
+    if (!el) return JSON.stringify({{success: false, message: 'Element index {index} not found. Run get_page_outline() first.'}});
+    try {{
+        el.scrollIntoView({{block: 'center', behavior: 'instant'}});
+        // 触发 mouseenter + mouseover 模拟鼠标悬停
+        el.dispatchEvent(new MouseEvent('mouseenter', {{bubbles: true, cancelable: true, view: window}}));
+        el.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true, cancelable: true, view: window}}));
+        return JSON.stringify({{success: true, message: 'Hovered [{index}]: <' + el.tagName.toLowerCase() + '>', tag: el.tagName.toLowerCase()}});
+    }} catch(e) {{
+        return JSON.stringify({{success: false, message: e.message}});
+    }}
+}})()"""
+        result = self.execute_js(js, session_id=session_id)
+        try:
+            return json.loads(result.get('data', '{}'))
+        except:
+            return {'success': False, 'raw': result.get('data', '')[:200]}
+
     def input_text_index(self, index, text, session_id=None, submit=False):
         """
         通过编号往输入框填文字（可选回车提交）
@@ -344,21 +372,69 @@ class TMWebDriver:
         import base64 as _b64
         import json as _json
         # base64 编码文字避免引号转义地狱
+        # 注意：atob() 返回的是字节字符串（每个字符 charCode 0-255），
+        # 不是 Unicode 字符。中文 UTF-8 字节会被当 Latin-1 解读 → 乱码。
+        # 修复：用 TextDecoder 从字节字符串解 UTF-8。
         b64_text = _b64.b64encode(text.encode()).decode()
         js = f"""(function() {{
     var el = window._tmw_get_element_by_index ? window._tmw_get_element_by_index({index}) : null;
     if (!el) return JSON.stringify({{success: false, message: 'Element not found'}});
     try {{
-        var text = atob('{b64_text}');
+        // atob → 字节字符串 → TextDecoder 解 UTF-8 → 正确的 Unicode 字符串
+        var byteStr = atob('{b64_text}');
+        var bytes = new Uint8Array(byteStr.length);
+        for (var i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+        var text = new TextDecoder('utf-8').decode(bytes);
         el.scrollIntoView({{block: 'center'}});
         el.focus();
-        // 用 native setter 触发 React 等框架的 onChange
-        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-                  || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
-        if (setter) setter.call(el, text);
-        else el.value = text;
-        el.dispatchEvent(new Event('input', {{bubbles: true}}));
-        el.dispatchEvent(new Event('change', {{bubbles: true}}));
+
+        if (el.isContentEditable) {{
+            // Contenteditable 策略（参考 Page Agent）：
+            // beforeinput -> innerText -> input 事件序列
+            // React contenteditable 靠 InputEvent('beforeinput') 同步状态
+
+            // 清除已有内容
+            el.dispatchEvent(new InputEvent('beforeinput', {{
+                bubbles: true, cancelable: true, inputType: 'deleteContent'
+            }}));
+            el.innerText = '';
+            el.dispatchEvent(new InputEvent('input', {{
+                bubbles: true, inputType: 'deleteContent'
+            }}));
+
+            // 插入新内容
+            el.dispatchEvent(new InputEvent('beforeinput', {{
+                bubbles: true, cancelable: true, inputType: 'insertText', data: text
+            }}));
+            el.innerText = text;
+            el.dispatchEvent(new InputEvent('input', {{
+                bubbles: true, inputType: 'insertText', data: text
+            }}));
+
+            // 验证，失败则 execCommand fallback
+            if (el.innerText.trim() !== text.trim()) {{
+                el.focus();
+                var sel = window.getSelection();
+                var rng = document.createRange();
+                rng.selectNodeContents(el);
+                sel.removeAllRanges();
+                sel.addRange(rng);
+                document.execCommand('delete', false);
+                document.execCommand('insertText', false, text);
+            }}
+
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            el.blur();
+        }} else {{
+            // 普通 input/textarea：用 native setter 触发 React onChange
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+                      || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+            if (setter) setter.call(el, text);
+            else el.value = text;
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+        }}
+
         if ({str(submit).lower()}) {{
             el.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}}));
             if (el.form) el.form.submit();
@@ -373,6 +449,167 @@ class TMWebDriver:
             return json.loads(result.get('data', '{}'))
         except:
             return {'success': False, 'raw': result.get('data', '')[:200]}
+
+    # ===== CDP 增强操作 =====
+    # 利用 background.js 已有的 chrome.debugger 桥接
+    # 发真实 CDP 命令（isTrusted: true），解决 React contenteditable 等框架不认合成事件的问题
+
+    def _cdp_command(self, method, params=None, session_id=None):
+        """
+        发送 CDP 命令到浏览器 tab（内部方法）
+        利用 background.js 已有的 handleCDP -> chrome.debugger.sendCommand 桥接
+
+        :param method: CDP 方法名，如 'Input.dispatchMouseEvent'
+        :param params: CDP 参数 dict
+        :return: CDP 返回结果 dict
+        """
+        code = {'cmd': 'cdp', 'method': method, 'params': params or {}}
+        result = self.execute_js(code, session_id=session_id)
+        return result.get('data')
+
+    def _cdp_batch(self, commands, session_id=None):
+        """
+        批量发送 CDP 命令（一次 attach，多个命令，最后 detach）
+        避免连续多次 attach/detach 导致的竞争条件和 tab 僵死
+
+        :param commands: [(method, params), ...] CDP 命令列表
+        :return: [result1, result2, ...]
+        """
+        cmd_list = [{'cmd': 'cdp', 'method': m, 'params': p or {}} for m, p in commands]
+        code = {'cmd': 'batch', 'commands': cmd_list}
+        result = self.execute_js(code, session_id=session_id)
+        return result.get('data', [])
+
+    def cdp_click_by_index(self, index, session_id=None):
+        """
+        通过 CDP Input.dispatchMouseEvent 实现真实鼠标点击
+        产生 isTrusted: true 的事件，React / Web Component 等框架认
+
+        比 click_index() 更强：不用 el.click() 发合成事件，
+        而是让 Chrome 用 DevTools Protocol 真的"移动鼠标并点击"。
+
+        :param index: get_page_outline() 返回的编号
+        :return: dict {success, message, x, y, tag}
+        """
+        # 获取元素坐标
+        js = f"""(function() {{
+    var el = window._tmw_get_element_by_index ? window._tmw_get_element_by_index({index}) : null;
+    if (!el) return JSON.stringify({{success: false, message: 'Element not found. Run get_page_outline() first.'}});
+    el.scrollIntoView({{block: 'center', behavior: 'instant'}});
+    var r = el.getBoundingClientRect();
+    return JSON.stringify({{success: true, x: r.left + r.width/2, y: r.top + r.height/2, tag: el.tagName.toLowerCase()}});
+}})()"""
+        result = self.execute_js(js, session_id=session_id)
+        try:
+            rect = json.loads(result.get('data', '{}'))
+        except:
+            return {'success': False, 'message': 'Failed to parse element position'}
+        if not rect.get('success'):
+            return {'success': False, 'message': rect.get('message', 'Unknown error')}
+
+        x, y = rect['x'], rect['y']
+
+        # CDP 鼠标事件序列：用 batch 一次 attach 避免竞争
+        self._cdp_batch([
+            ('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': x, 'y': y, 'button': 'left', 'pointerType': 'mouse'}),
+            ('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1, 'pointerType': 'mouse'}),
+            ('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1, 'pointerType': 'mouse'})
+        ], session_id=session_id)
+
+        return {
+            'success': True,
+            'message': f'CDP real click [{index}]: <{rect["tag"]}> at ({x:.0f},{y:.0f})',
+            'x': x, 'y': y, 'tag': rect['tag']
+        }
+
+    def cdp_input_text_by_index(self, index, text, session_id=None, submit=False):
+        """
+        CDP 真实点击 + beforeinput 填充 contenteditable
+        最强方案：先用 CDP 真实点击激活 React 焦点（isTrusted: true），
+        再用 beforeinput 事件序列填内容。
+
+        适用于 input_text_index 搞不定的顽固 contenteditable。
+
+        :param index: get_page_outline() 返回的编号
+        :param text: 要输入的文字
+        :param submit: 是否按回车提交
+        :return: dict {success, message}
+        """
+        # Step 1: CDP 真实点击激活元素
+        click_result = self.cdp_click_by_index(index, session_id=session_id)
+        if not click_result.get('success'):
+            return click_result
+
+        # Step 2: 等待 React 处理焦点
+        import time
+        time.sleep(0.15)
+
+        # Step 3: 填充内容（beforeinput + innerText + input）
+        import base64 as _b64
+        b64_text = _b64.b64encode(text.encode()).decode()
+        js = f"""(function() {{
+    var el = window._tmw_get_element_by_index ? window._tmw_get_element_by_index({index}) : null;
+    if (!el) return JSON.stringify({{success: false, message: 'Element not found'}});
+    try {{
+        if(!window._tmw_b64d)window._tmw_b64d=function(s){{var b=atob(s);var a=new Uint8Array(b.length);for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return new TextDecoder('utf-8').decode(a);}};
+        var t = window._tmw_b64d('{b64_text}');
+        el.scrollIntoView({{block: 'center'}});
+        el.focus();
+
+        if (el.isContentEditable) {{
+            // 清除
+            el.dispatchEvent(new InputEvent('beforeinput', {{
+                bubbles: true, cancelable: true, inputType: 'deleteContent'
+            }}));
+            el.innerText = '';
+            el.dispatchEvent(new InputEvent('input', {{
+                bubbles: true, inputType: 'deleteContent'
+            }}));
+            // 插入
+            el.dispatchEvent(new InputEvent('beforeinput', {{
+                bubbles: true, cancelable: true, inputType: 'insertText', data: t
+            }}));
+            el.innerText = t;
+            el.dispatchEvent(new InputEvent('input', {{
+                bubbles: true, inputType: 'insertText', data: t
+            }}));
+            // fallback
+            if (el.innerText.trim() !== t.trim()) {{
+                el.focus();
+                var sel = window.getSelection();
+                var rng = document.createRange();
+                rng.selectNodeContents(el);
+                sel.removeAllRanges();
+                sel.addRange(rng);
+                document.execCommand('delete', false);
+                document.execCommand('insertText', false, t);
+            }}
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            el.blur();
+        }} else {{
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+                      || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+            if (setter) setter.call(el, t);
+            else el.value = t;
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+        }}
+
+        if ({str(submit).lower()}) {{
+            el.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}}));
+            if (el.form) el.form.submit();
+        }}
+        return JSON.stringify({{success: true, message: 'CDP filled [{index}]: ' + t.substring(0, 30)}});
+    }} catch(e) {{
+        return JSON.stringify({{success: false, message: e.message}});
+    }}
+}})()"""
+        result = self.execute_js(js, session_id=session_id)
+        try:
+            return json.loads(result.get('data', '{}'))
+        except:
+            return {'success': False, 'raw': result.get('data', '')[:200]}
+
 
     # ===== Phase 2: Skill 沉淀 API =====
 
