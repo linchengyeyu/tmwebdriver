@@ -133,10 +133,15 @@ class TMWebDriver:
                         tabs = data.get('tabs', [])
                         current_tab_ids = {str(tab['id']) for tab in tabs}
                         print(f"Received tabs update: {current_tab_ids}")
-                        for sid in list(driver.sessions.keys()):
-                            sess = driver.sessions[sid]
-                            if sess.type == 'ext_ws' and sid not in current_tab_ids:
-                                sess.mark_disconnected()
+                        # 2026-08-21 修复：多扩展并存时（日常 Chrome + ego-browser 同时
+                        # 连 WS:18765），空 tab 列表的一方会把另一方注册的会话全部误清。
+                        # 规则：tab 列表为空的连接只跳过，不触发全局清理——扩展重连初期
+                        # 或纯工具型浏览器（无普通网页 tab）上报空集是合法状态。
+                        if current_tab_ids:
+                            for sid in list(driver.sessions.keys()):
+                                sess = driver.sessions[sid]
+                                if sess.type == 'ext_ws' and sid not in current_tab_ids:
+                                    sess.mark_disconnected()
                         for tab in tabs:
                             session_id = str(tab['id'])
                             session_info = {'url': tab.get('url'), 'title': tab.get('title', ''), 'connected_at': time.time(), 'type': 'ext_ws'}
