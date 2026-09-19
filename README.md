@@ -4,6 +4,27 @@ Control the Chrome browser you're **already logged into**. No new browser instan
 
 **New in v2 (2026-07):** DOM Outline API + Skill auto-sedimentation — borrowed ideas from [alibaba/page-agent](https://github.com/alibaba/page-agent) (27k★) and [browser-use](https://github.com/browser-use/browser-use) (105k★), but **without the per-step LLM cost**.
 
+**v2.2 (2026-09):** chunked long-result guarantee / deterministic readiness wait / execution channel refactor (channel=auto·cdp·script) / optional token auth / behavior convergence / outline aria semantics / self-healing skills. See SKILL.md.
+
+---
+
+## ⚠️ REQUIRED FOR AGENTS: install SKILL.md first — otherwise your agent won't know how to use this
+
+**This extension is driven by AI agents, not clicked by humans.** Without SKILL.md your agent has no idea
+which APIs exist, how indices work, or what the responses look like. **After setting up the server, you MUST
+install SKILL.md into your agent's skill directory:**
+
+```bash
+# Hermes / generic agents (skill-dir convention):
+mkdir -p ~/.hermes/skills/browser/tmwebdriver
+cp SKILL.md ~/.hermes/skills/browser/tmwebdriver/SKILL.md
+```
+
+Then just tell your agent "use tmwebdriver to open / operate ...". SKILL.md contains the full HTTP/Python API,
+long-value conventions, pitfalls and install steps — agents that read it can drive the extension.
+
+---
+
 ---
 
 ## ✨ Highlights

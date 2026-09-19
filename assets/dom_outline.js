@@ -139,6 +139,50 @@
     return false
   }
 
+  // ===== #6 无障碍语义（借鉴 Playwright aria snapshot / WAI-ARIA name computation 简化版）=====
+  // 隐式 role 映射（无显式 role 属性时按标签/类型推断）
+  const IMPLICIT_ROLE = {
+    a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
+    summary: 'button', option: 'option', optgroup: 'group', nav: 'navigation',
+    main: 'main', form: 'form', dialog: 'dialog', menu: 'menu', search: 'search',
+    h1: 'heading', h2: 'heading', h3: 'heading', h4: 'heading', h5: 'heading', h6: 'heading'
+  }
+  const INPUT_ROLE = { text: 'textbox', search: 'searchbox', email: 'textbox', url: 'textbox',
+    password: 'textbox', tel: 'textbox', checkbox: 'checkbox', radio: 'radio',
+    submit: 'button', button: 'button', reset: 'button', range: 'slider', number: 'spinbutton' }
+
+  function resolveRole(el) {
+    const explicit = el.getAttribute('role')
+    if (explicit) return explicit
+    const tag = el.tagName.toLowerCase()
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase()
+      return INPUT_ROLE[t] || 'textbox'
+    }
+    return IMPLICIT_ROLE[tag] || ''
+  }
+
+  function accessibleName(el) {
+    // aria-labelledby > aria-label > 关联 label[for] > alt > title > placeholder > 直接文本
+    const labelledby = el.getAttribute('aria-labelledby')
+    if (labelledby) {
+      const parts = labelledby.split(/\s+/).map(id => document.getElementById(id))
+        .filter(Boolean).map(n => (n.textContent || '').trim()).filter(Boolean)
+      if (parts.length) return parts.join(' ').substring(0, 80)
+    }
+    const al = el.getAttribute('aria-label')
+    if (al) return al.substring(0, 80)
+    if (el.id) {
+      const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`)
+      if (label) return (label.textContent || '').trim().substring(0, 80)
+    }
+    const alt = el.getAttribute('alt'); if (alt) return alt.substring(0, 80)
+    const title = el.getAttribute('title'); if (title) return title.substring(0, 80)
+    const ph = el.getAttribute('placeholder'); if (ph) return ph.substring(0, 80)
+    const dt = getDirectText(el); if (dt) return dt.substring(0, 80)
+    return ''
+  }
+
   // ===== 主扫描函数：构建带编号的扁平 DOM 树 =====
   function buildFlatTree(options) {
     const blacklist = options.blacklist || []
@@ -189,6 +233,8 @@
         refMap[myIndex] = el
         selectorMap[myIndex] = {
           tag,
+          role: resolveRole(el),        // #6 显式/隐式无障碍角色
+          name: accessibleName(el),     // #6 无障碍名称（LLM 语义定位用）
           text: getDirectText(el).substring(0, 60),
           attrs: pickAttrs(el),
           xpath: getXPath(el)
@@ -255,8 +301,13 @@
     for (const idx of indices) {
       const info = selectorMap[idx]
       const attrsStr = formatAttrs(info.attrs)
+      // #6 无障碍语义进文本大纲：role 只在与标签不同义时显示，name 转义引号
+      let roleStr = ''
+      if (info.role && info.role !== info.tag) roleStr = ` role=${info.role}`
+      let nameStr = ''
+      if (info.name && info.name !== info.text) nameStr = ` name="${String(info.name).replace(/"/g, '\u201c').substring(0, 40)}"`
       const textStr = info.text ? ` ${info.text}` : ''
-      lines.push(`[${idx}]<${info.tag}${attrsStr}>${textStr}`)
+      lines.push(`[${idx}]<${info.tag}${roleStr}${nameStr}${attrsStr}>${textStr}`)
 
       if (lines.join('\n').length > maxLen) {
         lines.push(`... (truncated, ${indices.length - lines.length} more elements)`)
@@ -410,6 +461,7 @@
 
     return {
       tag, id, text, role, ariaLabel, placeholder, name, type, href,
+      accName: accessibleName(el), // #6 无障碍名称（自愈语义匹配用）
       dataTestId, className, xpath,
       selectors,
       bestSelector: selectors[0]

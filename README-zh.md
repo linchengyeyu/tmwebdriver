@@ -4,6 +4,26 @@
 
 **v2 新增 (2026-07):** DOM Outline API + Skill 自动蜕变——借鉴了 [alibaba/page-agent](https://github.com/alibaba/page-agent)（27k★）和 [browser-use](https://github.com/browser-use/browser-use)（105k★）的核心思路，但**每步零 LLM 成本**。
 
+**v2.2 (2026-09):** 长结果分块保障 / 确定性就绪等待 / 执行通道重构(channel=auto·cdp·script) / 可选 token 鉴权 / 行为收敛 / Outline 无障碍语义 / 技能失效自愈。详见 SKILL.md。
+
+---
+
+## ⚠️ Agent 使用必读：必须先安装 SKILL.md，否则 Agent 不会用
+
+**这个插件不是给"人"直接点的，是给 AI Agent 驱动的。** Agent 不看 SKILL.md 就不知道有哪些 API、
+编号怎么用、返回什么结构 —— 装了插件也等于没装。**装完下面的服务端后，务必把 SKILL.md 装进你的 Agent 技能目录：**
+
+```bash
+# Hermes / 通用 Agent（技能目录约定）：
+mkdir -p ~/.hermes/skills/browser/tmwebdriver
+cp SKILL.md ~/.hermes/skills/browser/tmwebdriver/SKILL.md
+```
+
+装完后对 Agent 说"用 tmwebdriver 打开/操作 xxx"即可；SKILL.md 里含完整 HTTP/Python API、
+长值约定、坑位清单和安装步骤，Agent 读它就会用。
+
+---
+
 ---
 
 ## ✨ 五大亮点

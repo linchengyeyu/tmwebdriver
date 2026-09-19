@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadType</key><string>com.google.Chrome</string>
+			<key>PayloadVersion</key><integer>1</integer>
+			<key>PayloadIdentifier</key><string>local.makermz.tmwd.chrome</string>
+			<key>PayloadUUID</key><string>1E199808-B589-4EB3-9160-2DDF75E0738D</string>
+			<key>PayloadDisplayName</key><string>TMWD Chrome 强制安装策略</string>
+			<key>ExtensionInstallForcelist</key>
+			<array>
+				<string>akajnmghgmcneahfaggpgaldfjcfnpjj;http://127.0.0.1:18766/tmwd/update.xml</string>
+			</array>
+		</dict>
+	</array>
+	<key>PayloadDisplayName</key><string>TMWD Chrome Policy</string>
+	<key>PayloadDescription</key><string>TMWD 扩展强制安装（个人机实验性方案）</string>
+	<key>PayloadIdentifier</key><string>local.makermz.tmwd</string>
+	<key>PayloadOrganization</key><string>Personal</string>
+	<key>PayloadRemovalDisallowed</key><false/>
+	<key>PayloadScope</key><string>System</string>
+	<key>PayloadType</key><string>Configuration</string>
+	<key>PayloadUUID</key><string>97262A7B-E8EC-40DF-BB15-003D921CEF94</string>
+	<key>PayloadVersion</key><integer>1</integer>
+</dict>
+</plist>

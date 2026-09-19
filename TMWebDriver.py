@@ -34,21 +34,90 @@ class Session:
         self.disconnect_at = time.time()
 
 
-class TMWebDriver:  
-    def __init__(self, host: str = '127.0.0.1', port: int = 18765):  
+class TMWebDriver:
+    @staticmethod
+    def _load_token():
+        """读取访问令牌：TMWD_TOKEN 环境变量优先，其次 token.txt（chmod 600）。
+        都没有 → 空 = 不启用鉴权（向后兼容既有调用方）。"""
+        tok = os.environ.get('TMWD_TOKEN')
+        if tok is not None: return tok.strip()
+        tf = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'token.txt')
+        if os.path.exists(tf):
+            try:
+                with open(tf) as f: return f.read().strip()
+            except Exception: pass
+        return ''
+
+    def __init__(self, host: str = '127.0.0.1', port: int = 18765, token=None):
         self.host, self.port = host, port
         self.sessions, self.results, self.acks = {}, {}, {}
-        self.default_session_id = None  
-        self.latest_session_id = None  
+        self.default_session_id = None
+        self.latest_session_id = None
+        # 鉴权（#4）：token 显式传 '' 可强制关闭；None = 从 env/token.txt 读
+        self.token = self._load_token() if token is None else (token or '')
         self.is_remote = socket.socket().connect_ex((host, port+1)) == 0
-        if not self.is_remote:  
-            self.start_ws_server()  
+        if not self.is_remote:
+            self.start_ws_server()
             self.start_http_server()
         else:
             self.remote = f'http://{self.host}:{self.port+1}/link'
 
     def start_http_server(self):
         self.app = app = bottle.Bottle()
+
+        # ---- 鉴权（#4）：token 启用时所有 /api、/link 路由要求凭证 ----
+        if self.token:
+            @app.hook('before_request')
+            def _require_token():
+                if request.path == '/health' or request.path.startswith('/tmwd/'): return  # 健康检查与 CRX 自托管（Chrome 更新器不带凭证）免鉴权
+                supplied = request.get_header('X-TMWD-Token') or ''
+                if not supplied:
+                    ah = request.get_header('Authorization') or ''
+                    if ah.startswith('Bearer '): supplied = ah[7:].strip()
+                if not supplied: supplied = (request.query.token or '').strip()
+                if not supplied:
+                    try:
+                        body = request.json
+                        if isinstance(body, dict): supplied = str(body.get('token', '') or '').strip()
+                    except Exception: pass
+                if supplied != self.token:
+                    raise bottle.HTTPError(401, json.dumps({'error': 'unauthorized', 'hint': 'send X-TMWD-Token header / ?token= / body token'}))
+
+        @app.route('/health')
+        def health():
+            return json.dumps({'ok': True, 'auth': bool(self.token), 'version': '2.2'}, ensure_ascii=False)
+
+        @app.route('/health', method=['GET', 'POST'])
+        def health():
+            return json.dumps({'ok': True, 'auth': bool(self.token), 'version': '2.2'}, ensure_ascii=False)
+
+        # ---- CRX 自托管（Chrome 正式版 136+ 忽略 --load-extension，走企业策略强制安装）----
+        _base = os.path.dirname(os.path.abspath(__file__))
+
+        @app.route('/tmwd/update.xml')
+        def tmwd_update_xml():
+            try:
+                with open(os.path.join(_base, 'assets', 'manifest.json')) as f:
+                    ver = json.load(f).get('version', '2.0')
+            except Exception:
+                ver = '2.0'
+            host = request.headers.get('Host') or f'127.0.0.1:{self.port+1}'
+            response.content_type = 'application/xml'
+            return ('<?xml version="1.0" encoding="UTF-8"?>'
+                    '<gupdate xmlns="http://www.google.com/update2/response" protocol="2.0">'
+                    '<app appid="akajnmghgmcneahfaggpgaldfjcfnpjj">'
+                    f'<updatecheck codebase="http://{host}/tmwd/tmwd.crx" version="{ver}" />'
+                    '</app></gupdate>')
+
+        @app.route('/tmwd/tmwd.crx')
+        def tmwd_crx():
+            crx = os.path.join(_base, 'packed', 'tmwd.crx')
+            if not os.path.exists(crx):
+                raise bottle.HTTPError(404, 'tmwd.crx 未打包：先跑 pack_crx.sh')
+            with open(crx, 'rb') as f:
+                data = f.read()
+            response.content_type = 'application/x-chrome-extension'
+            return data
 
         @app.route('/api/longpoll', method=['GET', 'POST'])
         def long_poll():
@@ -94,12 +163,27 @@ class TMWebDriver:
                 session_id = data.get('sessionId')
                 code = data.get('code')
                 timeout = float(data.get('timeout', 10.0))
+                channel = data.get('channel', 'auto')
                 try:
-                    result = self.execute_js(code, timeout=timeout, session_id=session_id)
+                    result = self.execute_js(code, timeout=timeout, session_id=session_id, channel=channel)
                     print('[remote result]', (str(code)[:50] + ' RESULT:' +str(result)[:50]).replace('\n', ' '))
                     return json.dumps({'r': result}, ensure_ascii=False)
                 except Exception as e:
                     return json.dumps({'r': {'error': str(e)}}, ensure_ascii=False)
+            if data.get('cmd') == 'execute_js_chunked':
+                try:
+                    full = self.execute_js_chunked(data.get('code'), session_id=data.get('sessionId'),
+                                                   key=data.get('key', '__tmwd_result'),
+                                                   chunk=int(data.get('chunk', 4000)),
+                                                   timeout=float(data.get('timeout', 15.0)))
+                    return json.dumps({'r': {'data': full}}, ensure_ascii=False)
+                except Exception as e:
+                    return json.dumps({'r': {'error': str(e)}}, ensure_ascii=False)
+            if data.get('cmd') == 'wait_ready':
+                ok = self.wait_ready(session_id=data.get('sessionId'),
+                                     timeout=float(data.get('timeout', 15.0)),
+                                     selector=data.get('selector'))
+                return json.dumps({'r': {'ready': bool(ok)}}, ensure_ascii=False)
             return 'ok'
         def run():
             from wsgiref.simple_server import make_server, WSGIServer, WSGIRequestHandler
@@ -120,10 +204,21 @@ class TMWebDriver:
     
     def start_ws_server(self) -> None:  
         driver = self  
-        class JSExecutor(WebSocket):  
-            def handle(self) -> None:  
-                try:  
-                    data = json.loads(self.data)  
+        class JSExecutor(WebSocket):
+            def handle(self) -> None:
+                try:
+                    data = json.loads(self.data)
+                    # ---- WS 鉴权（#4）：token 启用时，首条消息必须是 hello+token ----
+                    if driver.token and not getattr(self, 'authed', False):
+                        if data.get('type') == 'hello' and data.get('token') == driver.token:
+                            self.authed = True
+                            self.send_message(json.dumps({'type': 'auth_ok'}))
+                            return
+                        try:
+                            self.send_message(json.dumps({'type': 'auth_error', 'error': 'token required/mismatched'}))
+                        except Exception: pass
+                        self.close(1008, 'unauthorized')
+                        return
                     if data.get('type') == 'ready':  
                         session_id = data.get('sessionId')  
                         session_info = {'url': data.get('url'), 'title': data.get('title', ''),
@@ -186,12 +281,17 @@ class TMWebDriver:
         for session in self.sessions.values():
             if session.ws_client == client: session.mark_disconnected()
     
-    def execute_js(self, code, timeout=15, session_id=None) -> Any:  
-        if session_id is None: session_id = self.default_session_id  
+    def execute_js(self, code, timeout=15, session_id=None, channel='auto') -> Any:
+        """channel（#3）:
+        - 'auto'  默认：scripting 注入为主 → 瞬态错误重试 → CDP 兜底 → 按需剥 CSP 再试
+        - 'cdp'   CDP 优先（不依赖页面注入环境），失败回退 scripting
+        - 'script' 仅 scripting
+        旧版扩展忽略 channel 字段，等价 'auto'。"""
+        if session_id is None: session_id = self.default_session_id
         if self.is_remote:
             print('remote_execute_js')
-            response = self._remote_cmd({"cmd": "execute_js", "sessionId": session_id, 
-                                         "code": code, "timeout": str(timeout)}).get('r', {})
+            response = self._remote_cmd({"cmd": "execute_js", "sessionId": session_id,
+                                         "code": code, "timeout": str(timeout), "channel": channel}).get('r', {})
             if response.get('error'): raise Exception(response['error'])
             return response
  
@@ -210,8 +310,8 @@ class TMWebDriver:
 
         tp = session.type
         assert tp in ['ws', 'http', 'ext_ws'], f"Unsupported session type: {tp}"
-        exec_id = str(uuid.uuid4())  
-        payload_dict = {'id': exec_id, 'code': code}
+        exec_id = str(uuid.uuid4())
+        payload_dict = {'id': exec_id, 'code': code, 'channel': channel}
         if tp == 'ext_ws': payload_dict['tabId'] = int(session.id)
         payload = json.dumps(payload_dict)
 
@@ -788,7 +888,9 @@ class TMWebDriver:
         }
 
     def _remote_cmd(self, cmd):
-        return requests.post(self.remote, headers={"Content-Type": "application/json"}, json=cmd).json()
+        headers = {"Content-Type": "application/json"}
+        if self.token: headers['X-TMWD-Token'] = self.token  # #4 远程模式自动带凭证
+        return requests.post(self.remote, headers=headers, json=cmd).json()
 
     def get_all_sessions(self):  
         if self.is_remote:
@@ -821,10 +923,103 @@ class TMWebDriver:
         print(f"成功设置默认会话: {self.default_session_id}: {info['url']}")  
         return self.default_session_id  
     
-    def jump(self, url, timeout=10): self.execute_js(f"window.location.href='{url}'", timeout=timeout)
-    def newtab(self, url=None):
+    # ---- #2 就绪信号：确定性等待取代 reload+sleep+重试 ----
+
+    def wait_ready(self, session_id=None, timeout=15, selector=None, settle=0.4):
+        """等页面就绪：document.readyState === 'complete'（可选再等 selector 出现）。
+        settle 秒是给 SPA 渲染留的微稳定期。返回 bool，不抛异常。"""
+        sel_js = ''
+        if selector:
+            sel_js = 'if(ok){var el=document.querySelector(%s);ok=!!el;}' % json.dumps(selector)
+        # ok 时用双 requestAnimationFrame 等 SPA 渲染两帧再报就绪（execute_js 会 await Promise）
+        js = ("(function(){var ok=(document.readyState==='complete');" + sel_js +
+              "if(!ok)return '0';"
+              "return new Promise(function(res){requestAnimationFrame(function(){requestAnimationFrame(function(){res('1')})})})})()")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                r = self.execute_js(js, timeout=5, session_id=session_id)
+                if str(r.get('data', '')).strip() == '1':
+                    time.sleep(settle)
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.3)
+        return False
+
+    def wait_new_session(self, url_pattern='', timeout=15, exclude=None):
+        """等一个新会话出现（新建标签页冷启动慢的问题）。返回新 session id 或 None。"""
+        exclude = set(exclude or [])
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                if self.is_remote:
+                    matched = self._remote_cmd({"cmd": "find_session", "url_pattern": url_pattern}).get('r', [])
+                    pairs = [(m[0], m[1]) for m in matched] if matched and isinstance(matched[0], (list, tuple)) else []
+                else:
+                    pairs = self.find_session(url_pattern)
+                for sid, info in pairs:
+                    if sid not in exclude:
+                        return sid
+            except Exception:
+                pass
+            time.sleep(0.3)
+        return None
+
+    def jump(self, url, timeout=10, wait=True, selector=None, ready_timeout=15):
+        """导航并（默认）等就绪。wait=True 返回 bool（页面是否就绪）。"""
+        self.execute_js(f"window.location.href={json.dumps(url)}", timeout=timeout)
+        if wait:
+            return self.wait_ready(timeout=ready_timeout, selector=selector)
+        return None
+
+    def newtab(self, url=None, wait=True, ready_timeout=15):
+        """新开标签页。wait=True 时等新会话注册 + 页面就绪，返回 {'newSession': sid, ...}。"""
         if url is None: url = "http://www.baidu.com/robots.txt"
-        return self.execute_js(f'GM_openInTab("{url}");')
+        try:
+            if self.is_remote:
+                before = {m[0] for m in (self._remote_cmd({"cmd": "find_session", "url_pattern": ''}).get('r', []) or []) if isinstance(m, (list, tuple))}
+            else:
+                before = {s['id'] for s in self.get_all_sessions()}
+        except Exception:
+            before = set()
+        r = self.execute_js(f'GM_openInTab({json.dumps(url)});')
+        if not wait: return r
+        new_sid = self.wait_new_session(url_pattern=url.split('?')[0][:60], timeout=ready_timeout, exclude=before)
+        if new_sid:
+            self.wait_ready(session_id=new_sid, timeout=ready_timeout)
+            out = {'newSession': new_sid}
+            if isinstance(r, dict):
+                out.update({k: v for k, v in r.items() if k != 'data'} or {})
+            return out
+        return {'newSession': None}
+
+    # ---- #1 超长结果保障：存 window 变量 + 分段取回（协议级，防任何环节截断） ----
+
+    def execute_js_chunked(self, code, session_id=None, key='__tmwd_result', chunk=4000, timeout=15):
+        """code 必须是【表达式】（如 document.documentElement.outerHTML）。
+        结果存 window.<key>，只回长度，再分段 substring 取回拼接。
+        任何单段异常已取部分照常返回，不抛。"""
+        wrapped = ("(window.%s = String((%s)), JSON.stringify({ok:1, len: window.%s.length}))"
+                   % (key, code, key))
+        r = self.execute_js(wrapped, session_id=session_id, timeout=timeout)
+        try:
+            total = int(json.loads(r.get('data', '{}')).get('len', 0))
+        except Exception:
+            total = 0
+        parts, off = [], 0
+        while off < total:
+            n = min(chunk, total - off)
+            j = "String(window.%s).substring(%d, %d)" % (key, off, off + n)
+            try:
+                r2 = self.execute_js(j, session_id=session_id, timeout=timeout)
+                seg = r2.get('data', '')
+                if not isinstance(seg, str) or seg == '': break
+                parts.append(seg)
+            except Exception:
+                break
+            off += n
+        return ''.join(parts)
 
     # ================================================================
     # Site Skills — 灵感来自 Browser Harness 的 domain-skills
@@ -921,11 +1116,69 @@ class TMWebDriver:
             except: pass
         return result
 
-    def execute_skill(self, name, domain=None, timeout=15, session_id=None, **variables):
+    def _match_outline_step(self, step, outline):
+        """#7 语义匹配：在 outline 的 selectorMap 里找回 step 对应的元素。
+        打分：tag 命中 +2；文本/name/aria/placeholder 精确 +3 / 包含 +2。
+        返回 (index, score) 或 None。"""
+        best_idx, best_score = None, 0
+        target_text = (step.get('text') or '').strip()
+        old_sel = step.get('selectors') or []
+        # 从旧选择器里捞语义线索（tag="text" 形式、placeholder 等）
+        for s in old_sel:
+            if isinstance(s, str) and '=' in s and not s.startswith(('#', '[', 'xpath:', 'a[')):
+                frag = s.split('=', 1)[1].strip('"')
+                if frag and len(frag) <= 30 and frag not in (target_text,): target_text = target_text or frag
+        smap = outline.get('selectorMap') or {}
+        for idx, info in smap.items():
+            score = 0
+            if info.get('tag') == step.get('tag'): score += 2
+            attrs = info.get('attrs') or {}
+            cands = [info.get('text', ''), info.get('name', ''), info.get('role', ''),
+                     attrs.get('aria-label', ''), attrs.get('placeholder', ''), attrs.get('name', ''), attrs.get('title', '')]
+            for c in cands:
+                c = (c or '').strip()
+                if not c or not target_text: continue
+                if c == target_text: score += 3
+                elif target_text in c or c in target_text: score += 2
+            if score > best_score: best_idx, best_score = idx, score
+        return (best_idx, best_score) if best_score >= 4 else None
+
+    def _heal_skill(self, skill, name, domain, failed_step, session_id=None):
+        """#7 自愈：重扫 outline → 语义匹配失败步 → 更新 selectors → 重新生成 JS 写回。"""
+        steps = skill.get('resolved_steps')
+        if not steps or not (1 <= failed_step <= len(steps)): return None
+        try:
+            outline = self.get_page_outline(session_id=session_id)
+        except Exception:
+            return None
+        hit = self._match_outline_step(steps[failed_step - 1], outline)
+        if not hit: return None
+        idx, score = hit
+        new_sel = self.get_element_selector(idx, session_id=session_id)
+        if not new_sel or not new_sel.get('selectors'): return None
+        step = steps[failed_step - 1]
+        step['selectors'] = new_sel['selectors']
+        step['tag'] = new_sel.get('tag', step.get('tag'))
+        if new_sel.get('text'): step['text'] = new_sel['text']
+        skill['js'] = self._gen_skill_js(steps, skill.get('description', ''))
+        skill.setdefault('healed', []).append(
+            {'step': failed_step, 'score': score, 'at': time.strftime('%Y-%m-%d %H:%M:%S')})
+        skill['updated_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            skill_file = os.path.join(self._skills_dir(), f"{domain}.json")
+            with open(skill_file) as f: all_skills = json.load(f)
+            all_skills[name] = skill
+            with open(skill_file, 'w') as f: json.dump(all_skills, f, ensure_ascii=False, indent=2)
+        except Exception:
+            return None
+        return True
+
+    def execute_skill(self, name, domain=None, timeout=15, session_id=None, heal=True, **variables):
         """
         执行一个已保存的技能（带变量替换）
         - {{keyword}} 占位符会被替换为 variables 中对应的值
         - 自动更新 use_count
+        - #7 自愈：元素找不到时重扫 outline 语义匹配，命中则更新技能并重试一次
 
         示例:
             driver.execute_skill("search", keyword="AI工具")
@@ -946,12 +1199,31 @@ class TMWebDriver:
         if domain:
             skill_file = os.path.join(self._skills_dir(), f"{domain}.json")
             try:
-                with open(skill_file, 'r') as f: all_skills = json.load(f)
+                with open(skill_file) as f: all_skills = json.load(f)
                 all_skills[name]['use_count'] = all_skills[name].get('use_count', 0) + 1
                 with open(skill_file, 'w') as f: json.dump(all_skills, f, ensure_ascii=False, indent=2)
             except: pass
 
-        return self.execute_js(js_code, timeout=timeout, session_id=session_id)
+        result = self.execute_js(js_code, timeout=timeout, session_id=session_id)
+
+        # ---- #7 失效自愈：element not found → 重扫匹配 → 写回 → 重试一次 ----
+        if heal and isinstance(result, dict):
+            try:
+                parsed = json.loads(result.get('data') or '')
+                if (isinstance(parsed, dict) and not parsed.get('success')
+                        and 'element not found' in str(parsed.get('message', ''))
+                        and parsed.get('step') and domain):
+                    healed = self._heal_skill(skill, name, domain, parsed['step'], session_id=session_id)
+                    if healed:
+                        r2 = self.execute_js(skill['js'], timeout=timeout, session_id=session_id)
+                        try: r2['healed'] = {'step': parsed['step']}
+                        except Exception: pass
+                        print(f"🔁 技能自愈成功: {domain}/{name} step {parsed['step']}")
+                        return r2
+                    print(f"⚠️ 技能自愈未命中: {domain}/{name} step {parsed['step']}")
+            except (ValueError, TypeError):
+                pass
+        return result
 
     def execute_and_save(self, name, js_code, description="", domain=None, timeout=15, session_id=None, **variables):
         """

@@ -10,3 +10,9 @@ build/
 *.log
 site_skills/mp.weixin.qq.com.json
 site_skills/chatgpt.com.json
+
+# 构建产物与密钥（不入库）
+*.pem
+token.txt
+packed/
+*.crx

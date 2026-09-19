@@ -1,11 +1,17 @@
 // background.js - Cookie + CDP Bridge
-chrome.runtime.onInstalled.addListener(() => {
-  console.log('CDP Bridge installed');
-  // Strip CSP headers to allow eval/inline scripts
-  chrome.declarativeNetRequest.updateDynamicRules({
-    removeRuleIds: [9999],
+importScripts('./config.js'); // TMWD_WS_URL / TMWD_TOKEN
+
+// #5 收敛：不再全局剥 CSP 响应头（原 onInstalled 里对所有站点生效的 DNR 规则已移除）。
+// 改为按需：execute_js 在 scripting+CDP 都被 CSP 挡住时，临时加上这条规则重试一次，
+// 空闲 10 秒后自动撤掉，平时页面保持原生 CSP。
+const CSP_RULE_ID = 9999;
+let cspRuleArmedAt = 0;
+async function ensureCspRule() {
+  cspRuleArmedAt = Date.now();
+  await chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: [CSP_RULE_ID],
     addRules: [{
-      id: 9999, priority: 1,
+      id: CSP_RULE_ID, priority: 1,
       action: { type: 'modifyHeaders', responseHeaders: [
         { header: 'content-security-policy', operation: 'remove' },
         { header: 'content-security-policy-report-only', operation: 'remove' }
@@ -13,6 +19,18 @@ chrome.runtime.onInstalled.addListener(() => {
       condition: { urlFilter: '*', resourceTypes: ['main_frame', 'sub_frame'] }
     }]
   });
+  // 撤防：规则生效 10 秒后移除（页面重新加载后才受影响，所以给足窗口）
+  setTimeout(async () => {
+    if (Date.now() - cspRuleArmedAt >= 9900) {
+      try { await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [CSP_RULE_ID] }); } catch (_) {}
+    }
+  }, 10000);
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  console.log('CDP Bridge installed');
+  // 清掉旧版本遗留的全局 CSP 剥离规则（升级收敛）
+  chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [CSP_RULE_ID] }).catch(() => {});
 });
 
 async function handleExtMessage(msg, sender) {
@@ -193,7 +211,8 @@ function buildCdpScript(code) {
 
 // --- WebSocket Client for TMWebDriver ---
 let ws = null;
-const WS_URL = 'ws://127.0.0.1:18765';
+const WS_URL = (typeof TMWD_WS_URL !== 'undefined' && TMWD_WS_URL) ? TMWD_WS_URL : 'ws://127.0.0.1:18765';
+const WS_TOKEN = (typeof TMWD_TOKEN !== 'undefined') ? (TMWD_TOKEN || '') : '';
 
 function scheduleProbe() {
   // Use chrome.alarms to survive MV3 service worker suspension
@@ -243,9 +262,50 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+// --- #3 执行通道重构：scripting / CDP 双通道 + 瞬态重试 + 按需 CSP ---
+// 瞬态错误：导航竞态导致的注入失败，重试一次通常就好（取代旧版"reload+sleep 5s"）
+const TRANSIENT_RE = /Frame with ID .* was removed|The frame was removed|cannot access contents of the page|Extension context invalidated|No frame .* found|Target closed|Frame was navigated/i;
+
+async function runScripting(tabId, code) {
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: async (s) => await eval(s),
+      args: [buildPageScript(code)]
+    });
+    let res = (result && result.length > 0) ? result[0].result : undefined;
+    if (res === null || res === undefined) {
+      res = { ok: false, error: { name: 'Error', message: 'executeScript returned null (possible CSP or context issue)', stack: '' }, csp: true };
+    }
+    return res;
+  } catch (e) {
+    return { ok: false, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' },
+      csp: /cannot access contents|Frame with ID|Content Security Policy|Refused to evaluate/i.test(e.message || '') };
+  }
+}
+
+async function runCdp(tabId, code) {
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3');
+    const cdpRes = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+      expression: buildCdpScript(code), awaitPromise: true, returnByValue: true
+    });
+    await chrome.debugger.detach({ tabId });
+    if (cdpRes.exceptionDetails) {
+      const desc = cdpRes.exceptionDetails.exception?.description || 'CDP Error';
+      return { ok: false, error: { name: 'Error', message: desc, stack: desc } };
+    }
+    return cdpRes.result.value;
+  } catch (cdpErr) {
+    try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+    return { ok: false, error: { name: 'Error', message: 'CDP failed: ' + cdpErr.message, stack: '' } };
+  }
+}
+
 async function handleWsExec(data) {
   const tabId = data.tabId;
-  console.log('[TMWD-WS] Exec request', data.id, 'on tab', tabId);
+  console.log('[TMWD-WS] Exec request', data.id, 'on tab', tabId, 'channel', data.channel || 'auto');
   ws.send(JSON.stringify({ type: 'ack', id: data.id }));
   if (!tabId) {
     ws.send(JSON.stringify({ type: 'error', id: data.id, error: 'No tabId provided' }));
@@ -256,43 +316,34 @@ async function handleWsExec(data) {
   const onCreated = (tab) => { newTabIds.add(tab.id); };
   chrome.tabs.onCreated.addListener(onCreated);
   try {
+    const channel = data.channel || 'auto';
     let res;
-    try {
-      const result = await chrome.scripting.executeScript({
-        target: { tabId },
-        world: 'MAIN',
-        func: async (s) => await eval(s),
-        args: [buildPageScript(data.code)]
-      });
-      // Chrome 148+ can return null instead of empty array
-      res = (result && result.length > 0) ? result[0].result : undefined;
-      if (res === null || res === undefined) {
-        console.log('[TMWD-WS] executeScript returned null/undefined, treating as CSP issue');
-        res = { ok: false, error: { name: 'Error', message: 'executeScript returned null (possible CSP or context issue)', stack: '' }, csp: true };
+    if (channel === 'cdp') {
+      // CDP 优先（不依赖页面注入环境），失败回退 scripting
+      res = await runCdp(tabId, data.code);
+      if (!res?.ok) {
+        console.log('[TMWD-WS] CDP-first failed, falling back to scripting:', res?.error?.message);
+        res = await runScripting(tabId, data.code);
       }
-    } catch (e) {
-      console.log('[TMWD-WS] scripting.executeScript failed:', e.message);
-      res = { ok: false, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' }, csp: true };
-    }
-    // CDP fallback for CSP-restricted pages
-    if (res && !res.ok && res.csp) {
-      console.log('[TMWD-WS] CDP fallback for tab', tabId);
-      const wrappedCode = buildCdpScript(data.code);
-      try {
-        await chrome.debugger.attach({ tabId }, '1.3');
-        const cdpRes = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-          expression: wrappedCode, awaitPromise: true, returnByValue: true
-        });
-        await chrome.debugger.detach({ tabId });
-        if (cdpRes.exceptionDetails) {
-          const desc = cdpRes.exceptionDetails.exception?.description || 'CDP Error';
-          res = { ok: false, error: { name: 'Error', message: desc, stack: desc } };
-        } else {
-          res = cdpRes.result.value;
+    } else {
+      // auto / script：注入为主
+      res = await runScripting(tabId, data.code);
+      const errMsg = res?.error?.message || '';
+      if (!res?.ok && TRANSIENT_RE.test(errMsg)) {
+        // 瞬态错误（导航竞态）：等 300ms 重试一次
+        await new Promise(r => setTimeout(r, 300));
+        res = await runScripting(tabId, data.code);
+      }
+      if (channel !== 'script' && !res?.ok && (res.csp || TRANSIENT_RE.test(res?.error?.message || ''))) {
+        // CSP / 仍瞬态失败 → CDP 兜底（Runtime.evaluate 属 DevTools 通道，不受页面 CSP 约束）
+        console.log('[TMWD-WS] CDP fallback for tab', tabId);
+        const wasCsp = !!res.csp;
+        res = await runCdp(tabId, data.code);
+        if (!res?.ok && wasCsp) {
+          // 双通道都被 CSP 挡住（如 debugger 被占用）：按需剥 CSP 响应头，
+          // 下次导航/重载后 scripting 通道即可用；10 秒后自动撤防
+          await ensureCspRule();
         }
-      } catch (cdpErr) {
-        try { await chrome.debugger.detach({ tabId }); } catch (_) {}
-        res = { ok: false, error: { name: 'Error', message: 'CDP fallback failed: ' + cdpErr.message, stack: '' } };
       }
     }
     // Grace period for async tab creation (e.g. link click with target=_blank)
@@ -331,6 +382,10 @@ function connectWS() {
   ws.onopen = async () => {
     console.log('[TMWD-WS] Connected!');
     scheduleKeepalive(); // Keep SW alive while connected
+    // #4 鉴权握手：token 启用时首条消息必须是 hello+token，通过后服务端才受理后续消息
+    if (WS_TOKEN) {
+      ws.send(JSON.stringify({ type: 'hello', token: WS_TOKEN }));
+    }
     const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
     ws.send(JSON.stringify({
       type: 'ext_ready',
@@ -341,6 +396,13 @@ function connectWS() {
   ws.onmessage = async (event) => {
     try {
       const data = JSON.parse(event.data);
+      if (data.type === 'auth_ok') { console.log('[TMWD-WS] Auth ok'); return; }
+      if (data.type === 'auth_error') {
+        console.error('[TMWD-WS] Auth failed:', data.error, '→ 检查 config.js TMWD_TOKEN 与服务端 token.txt 是否一致');
+        try { ws.close(); } catch (_) {}
+        ws = null;
+        return; // 保持 probe 循环，修正配置后会自动重连
+      }
       if (data.id && data.code) {
         let code = data.code;
         // If code is a JSON string representing an object, parse it
